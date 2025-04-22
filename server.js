@@ -29,98 +29,63 @@ function getAllConnectedClients(roomId) {
     );
 }
 
-function initializeRoomState(roomId) {
-    if (!roomStates.has(roomId)) {
-        roomStates.set(roomId, {
-            code: '',
-            output: '',
-            lastUpdate: Date.now()
-        });
-    }
+function getRoomState(roomId) {
+    return roomStates.get(roomId) || {};
 }
 
-app.use(cors());
-app.use(express.static('build'));
-app.use((req, res, next) => {
-    res.sendFile(path.join(__dirname, 'build', 'index.html'));
-});
+function updateRoomState(roomId, state) {
+    roomStates.set(roomId, state);
+}
 
 io.on('connection', (socket) => {
-    console.log('socket connected', socket.id);
-
-    socket.on(ACTIONS.JOIN, ({ roomId, username }) => {
+    socket.on('join', ({ roomId, username }) => {
         userSocketMap[socket.id] = username;
         socket.join(roomId);
-        initializeRoomState(roomId);
-        
         const clients = getAllConnectedClients(roomId);
-        
-        // Notify everyone in the room about the new user
         clients.forEach(({ socketId }) => {
-            io.to(socketId).emit(ACTIONS.JOINED, {
+            io.to(socketId).emit('joined', {
                 clients,
                 username,
                 socketId: socket.id,
             });
         });
 
-        // Send current room state to the new user
-        const roomState = roomStates.get(roomId);
+        const roomState = getRoomState(roomId);
         if (roomState && roomState.code) {
-            socket.emit(ACTIONS.SYNC_CODE, { code: roomState.code });
-            if (roomState.output) {
-                socket.emit(ACTIONS.OUTPUT_CHANGE, { output: roomState.output });
-            }
+            socket.emit('code-change', { code: roomState.code });
         }
     });
 
-    socket.on(ACTIONS.CODE_CHANGE, ({ roomId, code }) => {
-        if (roomStates.has(roomId)) {
-            roomStates.get(roomId).code = code;
-            roomStates.get(roomId).lastUpdate = Date.now();
-        }
-        socket.to(roomId).emit(ACTIONS.CODE_CHANGE, { code });
+    socket.on('code-change', ({ roomId, code }) => {
+        updateRoomState(roomId, { code });
+        socket.in(roomId).emit('code-change', { code });
     });
 
-    socket.on(ACTIONS.SYNC_CODE, ({ roomId }) => {
-        if (roomStates.has(roomId)) {
-            const { code } = roomStates.get(roomId);
-            socket.emit(ACTIONS.SYNC_CODE, { code });
-        }
-    });
-
-    socket.on(ACTIONS.OUTPUT_CHANGE, ({ roomId, output }) => {
-        if (roomStates.has(roomId)) {
-            roomStates.get(roomId).output = output;
-        }
-        socket.to(roomId).emit(ACTIONS.OUTPUT_CHANGE, { output });
+    socket.on('sync-code', ({ socketId, code }) => {
+        io.to(socketId).emit('code-change', { code });
     });
 
     socket.on('disconnecting', () => {
         const rooms = [...socket.rooms];
         rooms.forEach((roomId) => {
-            socket.in(roomId).emit(ACTIONS.DISCONNECTED, {
+            socket.in(roomId).emit('disconnected', {
                 socketId: socket.id,
                 username: userSocketMap[socket.id],
             });
         });
         delete userSocketMap[socket.id];
-        socket.leave();
     });
 });
 
-// Clean up inactive rooms periodically
-setInterval(() => {
-    const now = Date.now();
-    for (const [roomId, state] of roomStates.entries()) {
-        if (now - state.lastUpdate > 24 * 60 * 60 * 1000) { // 24 hours
-            roomStates.delete(roomId);
-        }
-    }
-}, 60 * 60 * 1000); // Check every hour
+// Serve static files from the React build directory
+app.use(express.static(path.join(__dirname, 'build')));
+
+// For any other routes, return the React index.html
+app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'build', 'index.html'));
+});
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
-    console.log('Waiting for client connections...');
+    console.log(`Server listening on port ${PORT}`);
 });
